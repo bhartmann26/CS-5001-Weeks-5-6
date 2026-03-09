@@ -221,3 +221,26 @@ class Console:
         level_fn = level_colors.get(level, dim)
         tag = bold(role_fn(f"[{role}]"))
         print(f"  {tag} {level_fn(msg)}")
+
+    # ── Color helpers exposed as class methods ─────────────────────────────
+    # These delegate to the module-level ANSI functions so callers can use
+    # either Console.cyan("text") or the bare cyan("text") form.
+
+    @staticmethod
+    def bold(t: str) -> str:    return bold(t)
+    @staticmethod
+    def dim(t: str) -> str:     return dim(t)
+    @staticmethod
+    def green(t: str) -> str:   return green(t)
+    @staticmethod
+    def yellow(t: str) -> str:  return yellow(t)
+    @staticmethod
+    def red(t: str) -> str:     return red(t)
+    @staticmethod
+    def blue(t: str) -> str:    return blue(t)
+    @staticmethod
+    def cyan(t: str) -> str:    return cyan(t)
+    @staticmethod
+    def magenta(t: str) -> str: return magenta(t)
+    @staticmethod
+    def white(t: str) -> str:   return white(t)

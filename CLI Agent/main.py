@@ -18,6 +18,7 @@ Commands:
   create    — [legacy] direct create from review result
 """
 
+import os
 import sys
 import argparse
 
@@ -48,6 +49,9 @@ def _require_ollama(ollama: OllamaClient):
 
 
 def _prompt_token():
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        return token
     try:
         return input("\n  GitHub token (leave blank to skip): ").strip() or None
     except (KeyboardInterrupt, EOFError):

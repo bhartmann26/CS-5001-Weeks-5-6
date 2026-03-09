@@ -238,7 +238,7 @@ Every agent action is appended to `.agent_log.jsonl`:
 - Python 3.11+ stdlib only
 - `git` in PATH
 - `ollama` running locally (`ollama serve`)
-- GitHub token with `repo` scope for publish actions
+- GitHub Personal Access Token (classic) with `repo` scope for publish actions. Store it in a `GITHUB_TOKEN` environment variable, pass it via `--token`, or enter it when prompted in the terminal.
 
 ---
 

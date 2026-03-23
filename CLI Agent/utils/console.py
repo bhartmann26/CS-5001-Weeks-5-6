@@ -9,6 +9,21 @@ import textwrap
 
 _IS_TTY = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
+# Use ASCII-safe symbols on Windows to avoid charmaps encoding errors
+def _safe_icon(unicode_char: str, ascii_fallback: str) -> str:
+    try:
+        if sys.platform == "win32":
+            enc = getattr(sys.stdout, "encoding", None) or ""
+            if not enc or "utf" not in enc.lower():
+                return ascii_fallback
+        return unicode_char
+    except Exception:
+        return ascii_fallback
+
+_ICON_OK = _safe_icon("\u2713", "[OK]")
+_ICON_FAIL = _safe_icon("\u2717", "[X]")
+_ICON_WARN = _safe_icon("\u26A0", "!")
+
 
 def _c(code: str, text: str) -> str:
     if not _IS_TTY:
@@ -52,15 +67,15 @@ class Console:
 
     @staticmethod
     def success(msg: str):
-        print(f"  {green('✓')} {green(msg)}")
+        print(f"  {green(_ICON_OK)} {green(msg)}")
 
     @staticmethod
     def warning(msg: str):
-        print(f"  {yellow('⚠')} {yellow(msg)}", file=sys.stderr)
+        print(f"  {yellow(_ICON_WARN)} {yellow(msg)}", file=sys.stderr)
 
     @staticmethod
     def error(msg: str):
-        print(f"  {red('✗')} {red(msg)}", file=sys.stderr)
+        print(f"  {red(_ICON_FAIL)} {red(msg)}", file=sys.stderr)
 
     @staticmethod
     def step(n: int, total: int, msg: str):

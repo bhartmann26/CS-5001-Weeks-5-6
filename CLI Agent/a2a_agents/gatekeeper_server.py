@@ -27,6 +27,10 @@ _DRAFT_FILE = os.path.join(_CLI_DIR, ".agent_draft.json")
 )
 class GatekeeperAgentServer(A2AServer):
 
+    def __init__(self):
+        port = int(os.environ.get("GATEKEEPER_PORT", "5005"))
+        super().__init__(url=f"http://localhost:{port}")
+
     @skill(
         name="Gate Draft",
         description="Save a draft for human approval/rejection",
@@ -63,14 +67,18 @@ class GatekeeperAgentServer(A2AServer):
             else:
                 result = {"status": "unknown_action", "action": action}
 
-            task.artifacts = [{"parts": [{"type": "text", "text": json.dumps(result)}]}]
-            task.status = TaskStatus(state=TaskState.COMPLETED)
+            result_json = json.dumps(result)
+            task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
+            task.status = TaskStatus(
+                state=TaskState.COMPLETED,
+                message={"role": "agent", "content": {"type": "text", "text": result_json}}
+            )
 
         except Exception as e:
-            task.artifacts = [{"parts": [{"type": "text", "text": json.dumps({"error": str(e)})}]}]
+            error_json = json.dumps({"error": str(e), "status": "failed"})
             task.status = TaskStatus(
                 state=TaskState.FAILED,
-                message={"role": "agent", "content": {"type": "text", "text": f"Gatekeeper failed: {e}"}},
+                message={"role": "agent", "content": {"type": "text", "text": error_json}},
             )
 
         return task

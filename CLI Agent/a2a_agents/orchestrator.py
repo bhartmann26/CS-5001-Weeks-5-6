@@ -100,15 +100,18 @@ class A2AOrchestrator:
             Console.agent_log("A2A", f"  {name.capitalize()} agent → port {port} (PID {proc.pid})")
 
         Console.agent_log("A2A", "Waiting for servers to be ready...")
-        time.sleep(4)
+        time.sleep(6)
 
         for name, port in AGENT_PORTS.items():
             url = f"http://localhost:{port}"
             try:
-                self._clients[name] = A2AClient(url)
-                Console.agent_log("A2A", f"  ✓ Connected to {name}")
+                client = A2AClient(url, timeout=300)
+                # Actually verify: fetch agent card (raises on connection failure)
+                _ = client.agent_card
+                self._clients[name] = client
+                Console.agent_log("A2A", f"  Connected to {name}")
             except Exception as e:
-                Console.agent_log("A2A", f"  ✗ Could not connect to {name}: {e}", level="warn")
+                Console.agent_log("A2A", f"  Could not connect to {name}: {e}", level="warn")
 
     def shutdown(self):
         """Stop all agent server processes."""
@@ -135,7 +138,21 @@ class A2AOrchestrator:
         if response is None:
             return {"status": "no_response"}
 
-        response_str = str(response)
+        response_str = str(response).strip()
+
+        # Detect A2A client error responses (connection/timeout failures)
+        if response_str.startswith("Error:") and "Failed to communicate" in response_str:
+            Console.agent_log("A2A", f"Agent {agent_name} unreachable: {response_str}", level="warn")
+            return {"status": "agent_unreachable", "error": response_str}
+
+        # A2AClient.ask() returns the raw text from artifact parts
+        if hasattr(response, "message") and response.message and isinstance(response, object) and not isinstance(response, str):
+            if isinstance(getattr(response, "message", None), dict):
+                content = response.message.get("content", {})
+                if isinstance(content, dict) and "text" in content:
+                    response_str = content["text"]
+                elif isinstance(content, str):
+                    response_str = content
 
         # Try direct JSON parse
         try:
@@ -152,7 +169,8 @@ class A2AOrchestrator:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        return {"raw_response": response_str[:500]}
+        Console.agent_log("A2A", f"Could not parse JSON from {agent_name}. Raw (first 300 chars): {response_str[:300]}", level="warn")
+        return {"status": "parse_failed", "raw_response": response_str[:500]}
 
     # ── MCP Tool Helpers ───────────────────────────────────────────────────
 

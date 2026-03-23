@@ -28,7 +28,8 @@ from patterns.planner import Plan
 class WriterAgentServer(A2AServer):
 
     def __init__(self, ollama: OllamaClient = None):
-        super().__init__()
+        port = int(os.environ.get("WRITER_PORT", "5003"))
+        super().__init__(url=f"http://localhost:{port}")
         self.ollama = ollama or OllamaClient()
 
     @skill(
@@ -88,19 +89,26 @@ class WriterAgentServer(A2AServer):
             elif plan.action == "pr":
                 draft_result = self._draft_pr(plan, review_obj)
             else:
+                result_json = json.dumps({"status": "no_action"})
+                task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
                 task.status = TaskStatus(
                     state=TaskState.COMPLETED,
-                    message={"role": "agent", "content": {"type": "text", "text": "No action needed"}},
+                    message={"role": "agent", "content": {"type": "text", "text": result_json}},
                 )
                 return task
 
-            task.artifacts = [{"parts": [{"type": "text", "text": json.dumps(draft_result)}]}]
-            task.status = TaskStatus(state=TaskState.COMPLETED)
+            result_json = json.dumps(draft_result)
+            task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
+            task.status = TaskStatus(
+                state=TaskState.COMPLETED,
+                message={"role": "agent", "content": {"type": "text", "text": result_json}},
+            )
 
         except Exception as e:
+            error_json = json.dumps({"error": str(e), "status": "failed"})
             task.status = TaskStatus(
                 state=TaskState.FAILED,
-                message={"role": "agent", "content": {"type": "text", "text": f"Writing failed: {e}"}},
+                message={"role": "agent", "content": {"type": "text", "text": error_json}},
             )
 
         return task

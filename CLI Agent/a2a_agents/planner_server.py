@@ -27,7 +27,8 @@ from prompts.templates import planning_prompt, instruction_planning_prompt, json
 class PlannerAgentServer(A2AServer):
 
     def __init__(self, ollama: OllamaClient = None):
-        super().__init__()
+        port = int(os.environ.get("PLANNER_PORT", "5002"))
+        super().__init__(url=f"http://localhost:{port}")
         self.ollama = ollama or OllamaClient()
 
     @skill(

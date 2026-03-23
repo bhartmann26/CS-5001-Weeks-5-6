@@ -1,29 +1,22 @@
 """
-MCP Client Wrapper — connects to MCP tool servers via stdio transport.
+MCP Client — calls MCP tool functions defined in the MCP server modules.
 
-Provides a simple synchronous interface for agents to call MCP tools:
-  client = MCPToolClient()
-  result = client.call("git_diff", {"commit_range": "HEAD~3..HEAD"})
+Uses in-process invocation of @mcp.tool() decorated functions for reliability
+on Windows (stdio transport has async subprocess issues on Windows).
 
-Manages lifecycle of MCP server subprocesses.
+The MCP tool definitions remain in mcp_git_server.py and mcp_github_server.py
+using FastMCP and @mcp.tool() decorators — this client imports and calls them.
 """
 
-import asyncio
-import json
 import os
 import sys
-from typing import Optional
+import json
 
-from mcp import ClientSession, StdioServerParameters, types
-from mcp.client.stdio import stdio_client
-
-# Path to this package's directory
-_SERVERS_DIR = os.path.dirname(os.path.abspath(__file__))
-_CLI_DIR = os.path.dirname(_SERVERS_DIR)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class MCPToolClient:
-    """Synchronous wrapper around MCP stdio clients for git and github tool servers."""
+    """Calls MCP tool functions defined in the MCP server modules."""
 
     def __init__(
         self,
@@ -37,101 +30,60 @@ class MCPToolClient:
         self.github_owner = github_owner
         self.github_repo = github_repo
 
-        # Cached tool listings
-        self._git_tools: list[str] = []
-        self._github_tools: list[str] = []
+        # Set env vars that MCP servers read
+        os.environ["GIT_REPO_PATH"] = self.repo_path
+        if github_token:
+            os.environ["GITHUB_TOKEN"] = github_token
+        if github_owner:
+            os.environ["GITHUB_OWNER"] = github_owner
+        if github_repo:
+            os.environ["GITHUB_REPO"] = github_repo
 
-    def _git_env(self) -> dict:
-        env = os.environ.copy()
-        env["GIT_REPO_PATH"] = self.repo_path
-        env["PYTHONPATH"] = _CLI_DIR + os.pathsep + env.get("PYTHONPATH", "")
-        return env
+        # Import MCP tool modules (they register @mcp.tool() functions)
+        import mcp_servers.mcp_git_server as git_server
+        import mcp_servers.mcp_github_server as github_server
 
-    def _github_env(self) -> dict:
-        env = os.environ.copy()
-        env["GITHUB_TOKEN"] = self.github_token
-        env["GITHUB_OWNER"] = self.github_owner
-        env["GITHUB_REPO"] = self.github_repo
-        env["PYTHONPATH"] = _CLI_DIR + os.pathsep + env.get("PYTHONPATH", "")
-        return env
+        # Map tool names to the actual @mcp.tool() functions
+        self._git_tools = {
+            "git_current_branch": git_server.git_current_branch,
+            "git_diff": git_server.git_diff,
+            "git_staged_diff": git_server.git_staged_diff,
+            "git_files_changed": git_server.git_files_changed,
+            "git_recent_commits": git_server.git_recent_commits,
+            "git_diff_stats": git_server.git_diff_stats,
+            "git_untracked_files": git_server.git_untracked_files,
+            "git_remote_url": git_server.git_remote_url,
+        }
 
-    def _git_params(self) -> StdioServerParameters:
-        return StdioServerParameters(
-            command=sys.executable,
-            args=[os.path.join(_SERVERS_DIR, "mcp_git_server.py")],
-            env=self._git_env(),
-        )
-
-    def _github_params(self) -> StdioServerParameters:
-        return StdioServerParameters(
-            command=sys.executable,
-            args=[os.path.join(_SERVERS_DIR, "mcp_github_server.py")],
-            env=self._github_env(),
-        )
-
-    # ── Public API ─────────────────────────────────────────────────────────
+        self._github_tools = {
+            "github_get_issue": github_server.github_get_issue,
+            "github_create_issue": github_server.github_create_issue,
+            "github_update_issue": github_server.github_update_issue,
+            "github_get_pr": github_server.github_get_pr,
+            "github_create_pr": github_server.github_create_pr,
+            "github_update_pr": github_server.github_update_pr,
+            "github_verify_token": github_server.github_verify_token,
+            "github_list_branches": github_server.github_list_branches,
+        }
 
     def call_git_tool(self, tool_name: str, arguments: dict = None) -> any:
-        """Call a git MCP tool and return the parsed result."""
-        return self._run_async(self._call_tool(self._git_params(), tool_name, arguments or {}))
+        """Call an MCP git tool by name."""
+        func = self._git_tools.get(tool_name)
+        if not func:
+            raise ValueError(f"Unknown git tool: {tool_name}. Available: {list(self._git_tools.keys())}")
+        return func(**(arguments or {}))
 
     def call_github_tool(self, tool_name: str, arguments: dict = None) -> any:
-        """Call a github MCP tool and return the parsed result."""
-        return self._run_async(self._call_tool(self._github_params(), tool_name, arguments or {}))
+        """Call an MCP github tool by name."""
+        func = self._github_tools.get(tool_name)
+        if not func:
+            raise ValueError(f"Unknown github tool: {tool_name}. Available: {list(self._github_tools.keys())}")
+        return func(**(arguments or {}))
 
     def list_git_tools(self) -> list[str]:
-        """List available git MCP tools."""
-        if not self._git_tools:
-            self._git_tools = self._run_async(self._list_tools(self._git_params()))
-        return self._git_tools
+        """List available MCP git tools."""
+        return list(self._git_tools.keys())
 
     def list_github_tools(self) -> list[str]:
-        """List available github MCP tools."""
-        if not self._github_tools:
-            self._github_tools = self._run_async(self._list_tools(self._github_params()))
-        return self._github_tools
-
-    # ── Async internals ────────────────────────────────────────────────────
-
-    async def _call_tool(self, params: StdioServerParameters, tool_name: str, arguments: dict) -> any:
-        """Connect to an MCP server, call a tool, return the result."""
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-
-                result = await session.call_tool(tool_name, arguments=arguments)
-
-                # Extract text content from result
-                if result.content:
-                    for block in result.content:
-                        if isinstance(block, types.TextContent):
-                            # Try to parse as JSON, otherwise return raw text
-                            try:
-                                return json.loads(block.text)
-                            except (json.JSONDecodeError, TypeError):
-                                return block.text
-                return None
-
-    async def _list_tools(self, params: StdioServerParameters) -> list[str]:
-        """Connect to an MCP server and list available tools."""
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools = await session.list_tools()
-                return [t.name for t in tools.tools]
-
-    @staticmethod
-    def _run_async(coro):
-        """Run an async coroutine from synchronous code."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # Already in an async context — use a new thread
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, coro).result()
-        else:
-            return asyncio.run(coro)
+        """List available MCP github tools."""
+        return list(self._github_tools.keys())

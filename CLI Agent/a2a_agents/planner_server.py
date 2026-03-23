@@ -72,13 +72,18 @@ class PlannerAgentServer(A2AServer):
                 )
                 return task
 
-            task.artifacts = [{"parts": [{"type": "text", "text": json.dumps(plan)}]}]
-            task.status = TaskStatus(state=TaskState.COMPLETED)
+            result_json = json.dumps(plan)
+            task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
+            task.status = TaskStatus(
+                state=TaskState.COMPLETED,
+                message={"role": "agent", "content": {"type": "text", "text": result_json}},
+            )
 
         except Exception as e:
+            error_json = json.dumps({"error": str(e), "action": "no_action"})
             task.status = TaskStatus(
                 state=TaskState.FAILED,
-                message={"role": "agent", "content": {"type": "text", "text": f"Planning failed: {e}"}},
+                message={"role": "agent", "content": {"type": "text", "text": error_json}},
             )
 
         return task

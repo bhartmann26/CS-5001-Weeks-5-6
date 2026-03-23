@@ -83,6 +83,8 @@ class GitClient:
             cwd=self.repo_path,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if result.returncode != 0 and not silent:
             raise subprocess.CalledProcessError(

@@ -1,8 +1,12 @@
 """
 A2A Orchestrator Client — coordinates all agent servers via A2A protocol.
 
-Used by main.py in 'protocol' mode to route CLI commands through A2A.
-Starts agent servers as background processes and communicates via A2A client.
+Architecture:
+  1. Orchestrator calls MCP tool servers for data gathering (git, github)
+  2. Orchestrator sends gathered data to A2A agent servers for processing
+  3. A2A agents do AI work (Ollama) and return results
+
+This avoids nested subprocess issues (A2A subprocess → MCP subprocess).
 """
 
 import sys
@@ -10,7 +14,6 @@ import os
 import json
 import time
 import subprocess
-import signal
 import atexit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,7 +40,7 @@ _CLI_DIR = os.path.dirname(_A2A_DIR)
 class A2AOrchestrator:
     """
     Orchestrates multi-agent pipelines via A2A protocol.
-    Manages server lifecycle and routes tasks between agents.
+    Uses MCP for tool access, A2A for agent communication.
     """
 
     def __init__(
@@ -54,7 +57,7 @@ class A2AOrchestrator:
         self._processes: list[subprocess.Popen] = []
         self._clients: dict[str, A2AClient] = {}
 
-        # MCP client (shared config)
+        # MCP client for tool access (called from orchestrator, not from agents)
         self.mcp = MCPToolClient(
             repo_path=self.repo_path,
             github_token=self.github_token,
@@ -62,7 +65,6 @@ class A2AOrchestrator:
             github_repo=self.github_repo,
         )
 
-        # Register cleanup
         atexit.register(self.shutdown)
 
     # ── Server lifecycle ───────────────────────────────────────────────────
@@ -82,12 +84,6 @@ class A2AOrchestrator:
         env = os.environ.copy()
         env["PYTHONPATH"] = _CLI_DIR + os.pathsep + env.get("PYTHONPATH", "")
         env["GIT_REPO_PATH"] = self.repo_path
-        if self.github_token:
-            env["GITHUB_TOKEN"] = self.github_token
-        if self.github_owner:
-            env["GITHUB_OWNER"] = self.github_owner
-        if self.github_repo:
-            env["GITHUB_REPO"] = self.github_repo
 
         for name, script in server_scripts.items():
             port = AGENT_PORTS[name]
@@ -97,31 +93,29 @@ class A2AOrchestrator:
                 [sys.executable, script],
                 env=env,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 cwd=_CLI_DIR,
             )
             self._processes.append(proc)
             Console.agent_log("A2A", f"  {name.capitalize()} agent → port {port} (PID {proc.pid})")
 
-        # Wait for servers to start
         Console.agent_log("A2A", "Waiting for servers to be ready...")
-        time.sleep(3)
+        time.sleep(4)
 
-        # Create A2A clients
         for name, port in AGENT_PORTS.items():
             url = f"http://localhost:{port}"
             try:
                 self._clients[name] = A2AClient(url)
-                Console.agent_log("A2A", f"  Connected to {name}: {self._clients[name].agent_card.name}")
+                Console.agent_log("A2A", f"  ✓ Connected to {name}")
             except Exception as e:
-                Console.agent_log("A2A", f"  Warning: Could not connect to {name}: {e}", level="warn")
+                Console.agent_log("A2A", f"  ✗ Could not connect to {name}: {e}", level="warn")
 
     def shutdown(self):
         """Stop all agent server processes."""
         for proc in self._processes:
             try:
                 proc.terminate()
-                proc.wait(timeout=5)
+                proc.wait(timeout=3)
             except Exception:
                 try:
                     proc.kill()
@@ -131,43 +125,86 @@ class A2AOrchestrator:
         self._clients.clear()
 
     def _send_task(self, agent_name: str, params: dict) -> dict:
-        """Send a task to an agent and return the result."""
+        """Send a task to an A2A agent and parse the result."""
         client = self._clients.get(agent_name)
         if not client:
             raise RuntimeError(f"No A2A client for agent: {agent_name}")
 
         response = client.ask(json.dumps(params))
 
-        # Parse response — may be a string or have artifacts
         if response is None:
-            return {"raw_response": "null", "status": "no_response"}
+            return {"status": "no_response"}
 
         response_str = str(response)
+
+        # Try direct JSON parse
         try:
             return json.loads(response_str)
         except (json.JSONDecodeError, TypeError):
-            # Try to find JSON object within the response text
-            start = response_str.find("{")
-            end = response_str.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                try:
-                    return json.loads(response_str[start:end + 1])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            return {"raw_response": response_str[:500]}
+            pass
+
+        # Try extracting JSON from within the text
+        start = response_str.find("{")
+        end = response_str.rfind("}")
+        if start != -1 and end > start:
+            try:
+                return json.loads(response_str[start:end + 1])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        return {"raw_response": response_str[:500]}
+
+    # ── MCP Tool Helpers ───────────────────────────────────────────────────
+
+    def _gather_git_data(self, commit_range: str = "", include_staged: bool = False) -> dict:
+        """Use MCP tools to gather all git data needed for review."""
+        Console.agent_log("MCP", "Gathering git data via MCP tools...")
+
+        branch = self.mcp.call_git_tool("git_current_branch")
+        Console.agent_log("MCP", f"  Branch: {branch}")
+
+        diff = self.mcp.call_git_tool("git_diff", {"commit_range": commit_range})
+        if include_staged:
+            staged = self.mcp.call_git_tool("git_staged_diff")
+            if staged and staged.strip():
+                diff = (diff or "") + "\n\n--- STAGED ---\n\n" + staged
+
+        if not diff or not diff.strip():
+            return {"status": "no_changes"}
+
+        Console.agent_log("MCP", f"  Diff: {len(diff)} chars")
+
+        files = self.mcp.call_git_tool("git_files_changed", {"commit_range": commit_range})
+        Console.agent_log("MCP", f"  Files: {len(files) if files else 0}")
+
+        commits = self.mcp.call_git_tool("git_recent_commits", {"n": 8, "commit_range": commit_range})
+        stats = self.mcp.call_git_tool("git_diff_stats", {
+            "diff_text": diff,
+            "files_json": files or [],
+        })
+
+        return {
+            "diff": diff,
+            "branch": branch,
+            "files": files or [],
+            "commits": commits or [],
+            "stats": stats or {},
+        }
 
     # ── Pipeline: Review ───────────────────────────────────────────────────
 
     def review(self, commit_range: str = "", include_staged: bool = False, include_untracked: bool = False) -> dict:
-        """Run the review pipeline via A2A: [Reviewer]"""
-        Console.agent_log("A2A", "Sending review task to Reviewer agent...")
+        """Run review: MCP gathers data → A2A Reviewer analyzes."""
 
-        result = self._send_task("reviewer", {
-            "commit_range": commit_range,
-            "include_staged": include_staged,
-            "include_untracked": include_untracked,
-        })
+        # Step 1: MCP tools gather git data
+        git_data = self._gather_git_data(commit_range=commit_range, include_staged=include_staged)
 
+        if git_data.get("status") == "no_changes":
+            return {"status": "no_changes"}
+
+        # Step 2: Send to Reviewer agent via A2A
+        Console.agent_log("A2A", "Sending data to Reviewer agent for analysis...")
+        result = self._send_task("reviewer", git_data)
         return result
 
     # ── Pipeline: Draft ────────────────────────────────────────────────────
@@ -181,13 +218,9 @@ class A2AOrchestrator:
         base_branch: str = "main",
         as_draft_pr: bool = False,
     ) -> dict:
-        """
-        Run the full draft pipeline via A2A:
-        [Reviewer?] → [Planner] → [Writer] → [Critic] → revision loop → [Gatekeeper]
-        """
+        """MCP gathers → A2A: Reviewer → Planner → Writer → Critic → Gatekeeper"""
         review_result = None
 
-        # If no instruction, run review first
         if not instruction:
             Console.agent_log("A2A", "No instruction — running review first...")
             review_result = self.review(commit_range=commit_range, include_staged=include_staged)
@@ -230,24 +263,24 @@ class A2AOrchestrator:
         # [Critic] — reflection loop (max 2 rounds)
         reflection = None
         for round_num in range(1, 3):
-            Console.agent_log("A2A", f"Sending reflection task to Critic agent (round {round_num})...")
+            Console.agent_log("A2A", f"Sending reflection task to Critic (round {round_num})...")
             reflection = self._send_task("critic", {"draft": draft, "plan": plan})
 
             if reflection.get("verdict") == "PASS" and reflection.get("passes_policy", True):
-                Console.agent_log("Gatekeeper", "Reflection verdict: PASS", level="success")
+                Console.agent_log("Critic", "Reflection verdict: PASS", level="success")
                 break
 
-            Console.agent_log("Gatekeeper", f"Reflection verdict: FAIL – {reflection.get('revision_notes', '')[:120]}", level="warn")
+            Console.agent_log("Critic", f"Reflection verdict: FAIL – {reflection.get('revision_notes', '')[:120]}", level="warn")
 
             if round_num < 2:
-                Console.agent_log("Writer", f"Revision required (round {round_num}). Redrafting...")
+                Console.agent_log("Writer", f"Revision required. Redrafting...")
                 draft = self._send_task("writer", {
                     "plan": plan,
                     "review_result": review_result,
                     "reflection_notes": reflection.get("revision_notes", ""),
                 })
             else:
-                Console.agent_log("Gatekeeper", "Max reflection rounds reached.", level="warn")
+                Console.agent_log("Critic", "Max reflection rounds reached.", level="warn")
 
         # [Gatekeeper] — save draft for approval
         Console.agent_log("A2A", "Sending gate task to Gatekeeper agent...")
@@ -270,7 +303,7 @@ class A2AOrchestrator:
     # ── Pipeline: Approve ──────────────────────────────────────────────────
 
     def approve(self, yes: bool, head_branch: str = "", base_branch: str = "main") -> dict:
-        """Approve or reject a pending draft."""
+        """Approve or reject via A2A Gatekeeper + MCP GitHub tools."""
         draft_file = os.path.join(_CLI_DIR, ".agent_draft.json")
         if not os.path.exists(draft_file):
             return {"status": "error", "message": "No pending draft found."}
@@ -284,20 +317,39 @@ class A2AOrchestrator:
             result = self._send_task("gatekeeper", {"action": "reject", "draft": draft})
             return result
 
-        result = self._send_task("gatekeeper", {
-            "action": "publish",
-            "draft": draft,
-            "head_branch": saved.get("head_branch", head_branch),
-            "base_branch": saved.get("base_branch", base_branch),
-            "as_draft_pr": saved.get("as_draft_pr", False),
-        })
-        return result
+        # Publish via MCP GitHub tools (called from orchestrator)
+        try:
+            if draft.get("kind") == "issue":
+                pub = self.mcp.call_github_tool("github_create_issue", {
+                    "title": draft.get("title", ""),
+                    "body": draft.get("body", ""),
+                    "labels": draft.get("labels", []),
+                })
+            else:
+                pub = self.mcp.call_github_tool("github_create_pr", {
+                    "title": draft.get("title", ""),
+                    "body": draft.get("body", ""),
+                    "head": saved.get("head_branch", head_branch),
+                    "base": saved.get("base_branch", base_branch),
+                    "draft": saved.get("as_draft_pr", False),
+                })
+
+            # Clean up draft file
+            try:
+                os.remove(draft_file)
+            except Exception:
+                pass
+
+            return {"status": "published", "result": pub}
+
+        except Exception as e:
+            return {"status": "error", "message": f"Publish failed: {e}"}
 
     # ── Pipeline: Improve ──────────────────────────────────────────────────
 
     def improve(self, number: int, kind: str, context: str = "") -> dict:
-        """Improve an existing issue or PR. Uses MCP tools directly for GitHub fetch."""
-        Console.agent_log("A2A", f"Fetching {kind} #{number} via MCP GitHub tools...")
+        """Improve existing issue/PR: MCP fetches → Ollama improves."""
+        Console.agent_log("MCP", f"Fetching {kind} #{number} via MCP GitHub tools...")
 
         try:
             if kind == "issue":
@@ -310,7 +362,6 @@ class A2AOrchestrator:
         original_title = item.get("title", "")
         original_body = item.get("body", "") or ""
 
-        # Use Writer agent to generate improvement
         from prompts.templates import improve_issue_prompt, improve_pr_prompt
         from utils.ollama import OllamaClient
 

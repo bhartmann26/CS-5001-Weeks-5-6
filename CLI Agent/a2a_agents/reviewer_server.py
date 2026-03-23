@@ -1,11 +1,8 @@
 """
 A2A Reviewer Agent Server — analyzes git changes via A2A protocol.
 
-Accepts tasks:
-  - "review_changes": analyze git diff and return ReviewResult
-
-Uses MCP client internally to call git tools.
-Uses Ollama for AI analysis.
+Receives pre-gathered git data (from MCP at orchestrator level),
+runs Ollama AI analysis, returns ReviewResult JSON.
 """
 
 import sys
@@ -15,7 +12,6 @@ import json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from python_a2a import A2AServer, skill, agent, run_server, TaskStatus, TaskState
-from mcp_servers.mcp_client import MCPToolClient
 from utils.ollama import OllamaClient
 from prompts.templates import analysis_prompt
 
@@ -27,9 +23,8 @@ from prompts.templates import analysis_prompt
 )
 class ReviewerAgentServer(A2AServer):
 
-    def __init__(self, mcp_client: MCPToolClient = None, ollama: OllamaClient = None):
+    def __init__(self, ollama: OllamaClient = None):
         super().__init__()
-        self.mcp = mcp_client or MCPToolClient()
         self.ollama = ollama or OllamaClient()
 
     @skill(
@@ -37,54 +32,48 @@ class ReviewerAgentServer(A2AServer):
         description="Analyze git diff, identify issues, categorize changes, assess risk",
         tags=["review", "diff", "analysis"],
     )
-    def review_changes(self, commit_range="", include_staged=False, include_untracked=False):
-        """Analyze git changes and produce a review result."""
-        pass  # Logic is in handle_task
+    def review_changes(self):
+        pass
 
     def handle_task(self, task):
-        """Process incoming A2A tasks."""
         message_data = task.message or {}
         content = message_data.get("content", {})
         text = content.get("text", "") if isinstance(content, dict) else str(content)
 
         try:
-            # Parse parameters from the message text (JSON expected)
             params = {}
             try:
                 params = json.loads(text)
             except (json.JSONDecodeError, TypeError):
                 pass
 
-            commit_range = params.get("commit_range", "")
-            include_staged = params.get("include_staged", False)
-
-            # ── 1. Gather data via MCP tools ──────────────────────────────
-            branch = self.mcp.call_git_tool("git_current_branch")
-
-            diff = self.mcp.call_git_tool("git_diff", {"commit_range": commit_range})
-            if include_staged:
-                staged = self.mcp.call_git_tool("git_staged_diff")
-                if staged and staged.strip():
-                    diff = (diff or "") + "\n\n--- STAGED CHANGES ---\n\n" + staged
+            diff = params.get("diff", "")
+            branch = params.get("branch", "unknown")
+            files = params.get("files", [])
+            commits = params.get("commits", [])
+            stats = params.get("stats", {})
 
             if not diff or not diff.strip():
-                task.artifacts = [{"parts": [{"type": "text", "text": json.dumps({"status": "no_changes"})}]}]
-                task.status = TaskStatus(state=TaskState.COMPLETED)
+                result_json = json.dumps({"status": "no_changes"})
+                task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
+                task.status = TaskStatus(
+                    state=TaskState.COMPLETED,
+                    message={"role": "agent", "content": {"type": "text", "text": result_json}},
+                )
                 return task
 
-            files = self.mcp.call_git_tool("git_files_changed", {"commit_range": commit_range})
-            commits = self.mcp.call_git_tool("git_recent_commits", {"n": 8, "commit_range": commit_range})
-            stats = self.mcp.call_git_tool("git_diff_stats", {
-                "diff_text": diff,
-                "files_json": files,
-            })
+            # Truncate diff for LLM context window (llama3.2:3b ~4K context)
+            max_diff = 12000
+            if len(diff) > max_diff:
+                diff = diff[:max_diff] + f"\n\n... [truncated, {len(diff)} total chars]"
 
-            # ── 2. Build prompt and run AI analysis ───────────────────────
             files_summary = "\n".join(
-                f"  {f.get('status_label','?').upper():10} {f['path']}" for f in files
+                f"  {f.get('status_label', '?').upper():10} {f['path']}"
+                for f in files if isinstance(f, dict)
             )
             commits_summary = "\n".join(
-                f"  {c['hash']} {c['subject']} ({c['author']}, {c['time']})" for c in commits
+                f"  {c['hash']} {c['subject']} ({c['author']}, {c['time']})"
+                for c in commits if isinstance(c, dict)
             )
 
             prompt = analysis_prompt(
@@ -96,7 +85,6 @@ class ReviewerAgentServer(A2AServer):
 
             analysis = self.ollama.generate_json(prompt)
 
-            # ── 3. Build review result ────────────────────────────────────
             review_result = {
                 "category": analysis.get("category", "unknown"),
                 "risk": analysis.get("risk", "unknown"),
@@ -104,23 +92,29 @@ class ReviewerAgentServer(A2AServer):
                 "summary": analysis.get("summary", ""),
                 "issues": analysis.get("issues", []),
                 "improvements": analysis.get("improvements", []),
-                "recommendation": analysis.get("recommendation", {}).get("action", "no_action"),
-                "justification": analysis.get("recommendation", {}).get("justification", ""),
-                "suggested_title": analysis.get("recommendation", {}).get("suggested_title", ""),
-                "labels": analysis.get("recommendation", {}).get("labels", []),
+                "recommendation": analysis.get("recommendation", {}).get("action", "no_action") if isinstance(analysis.get("recommendation"), dict) else analysis.get("recommendation", "no_action"),
+                "justification": analysis.get("recommendation", {}).get("justification", "") if isinstance(analysis.get("recommendation"), dict) else "",
+                "suggested_title": analysis.get("recommendation", {}).get("suggested_title", "") if isinstance(analysis.get("recommendation"), dict) else "",
+                "labels": analysis.get("recommendation", {}).get("labels", []) if isinstance(analysis.get("recommendation"), dict) else [],
                 "stats": stats,
-                "diff": diff[:5000],  # Truncate for A2A message size
+                "diff": params.get("diff", "")[:5000],
                 "files": files,
                 "branch": branch,
             }
 
-            task.artifacts = [{"parts": [{"type": "text", "text": json.dumps(review_result)}]}]
-            task.status = TaskStatus(state=TaskState.COMPLETED)
+            result_json = json.dumps(review_result)
+            task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
+            task.status = TaskStatus(
+                state=TaskState.COMPLETED,
+                message={"role": "agent", "content": {"type": "text", "text": result_json}},
+            )
 
         except Exception as e:
+            error_json = json.dumps({"error": str(e), "status": "failed"})
+            task.artifacts = [{"parts": [{"type": "text", "text": error_json}]}]
             task.status = TaskStatus(
                 state=TaskState.FAILED,
-                message={"role": "agent", "content": {"type": "text", "text": f"Review failed: {e}"}},
+                message={"role": "agent", "content": {"type": "text", "text": error_json}},
             )
 
         return task

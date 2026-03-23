@@ -3,6 +3,10 @@
 GitHub AI Agent — CLI
 Powered by Ollama llama3.2:3b (fully local)
 
+Week 7 Extension: MCP for Tooling + A2A for Agent Communication
+  --mode direct   -> original Week 5/6 behavior (direct Python calls)
+  --mode protocol -> MCP tool servers + A2A agent servers
+
 Multi-agent architecture:
   [Reviewer]   — analyzes code changes (ReviewAgent)
   [Planner]    — validates scope, decides action (PlannerAgent)
@@ -37,6 +41,10 @@ from utils.github import GitHubClient
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
+
+
+def _is_protocol_mode(args) -> bool:
+    return getattr(args, "mode", "direct") == "protocol"
 
 def _make_ollama() -> OllamaClient:
     return OllamaClient()
@@ -363,6 +371,174 @@ def cmd_create(args):
         creator.create_pr(review_result=result, base_branch=args.base, custom_instructions=args.instructions or "")
 
 
+# ── Protocol-mode commands (MCP + A2A) ────────────────────────────────────────
+
+
+def _make_orchestrator(args):
+    """Create and start the A2A orchestrator with MCP clients."""
+    from a2a_agents.orchestrator import A2AOrchestrator
+
+    token = getattr(args, "token", None) or os.environ.get("GITHUB_TOKEN", "")
+    owner, repo_name = "", ""
+    try:
+        owner, repo_name = _parse_owner_repo(args)
+    except Exception:
+        pass
+
+    orchestrator = A2AOrchestrator(
+        repo_path=getattr(args, "repo", "."),
+        github_token=token,
+        github_owner=owner,
+        github_repo=repo_name,
+    )
+    orchestrator.start_servers()
+    return orchestrator
+
+
+def cmd_review_protocol(args):
+    """Task 1 via A2A protocol."""
+    Console.header("GitHub AI Agent — Code Review [Protocol Mode: MCP + A2A]")
+    orch = _make_orchestrator(args)
+    try:
+        result = orch.review(
+            commit_range=getattr(args, "range", "") or "",
+            include_staged=getattr(args, "staged", False),
+            include_untracked=getattr(args, "untracked", False),
+        )
+
+        if result.get("status") == "no_changes":
+            Console.info("No changes detected. Nothing to review.")
+            return
+
+        # Display review result
+        Console.section("AI Analysis Report")
+        Console.kv("Category", result.get("category", "unknown"))
+        Console.kv("Risk", result.get("risk", "unknown"))
+        Console.kv("Summary", result.get("summary", ""))
+        Console.kv("Recommendation", result.get("recommendation", "no_action"))
+        Console.kv("Justification", result.get("justification", ""))
+
+        if result.get("issues"):
+            Console.section(f"Issues Found ({len(result['issues'])})")
+            for issue in result["issues"]:
+                Console.info(f"  [{issue.get('severity', '?').upper()}] {issue.get('file', '?')} — {issue.get('description', '')}")
+
+    finally:
+        orch.shutdown()
+
+
+def cmd_draft_protocol(args):
+    """Task 2 via A2A protocol."""
+    Console.header(f"GitHub AI Agent — Draft {args.type.upper()} [Protocol Mode: MCP + A2A]")
+    orch = _make_orchestrator(args)
+    try:
+        result = orch.draft(
+            kind=args.type,
+            instruction=getattr(args, "instruction", "") or "",
+            commit_range=getattr(args, "range", "") or "",
+            include_staged=getattr(args, "staged", False),
+            base_branch=getattr(args, "base", "main"),
+            as_draft_pr=getattr(args, "draft_pr", False),
+        )
+
+        if result.get("status") == "awaiting_approval":
+            draft = result.get("draft", {})
+            Console.blank()
+            Console.divider("═")
+            Console.kv("Title", draft.get("title", ""))
+            Console.kv("Labels", ", ".join(draft.get("labels", [])))
+            Console.blank()
+            Console.markdown_preview(draft.get("body", ""), max_lines=60)
+            Console.divider("═")
+
+            reflection = result.get("reflection", {})
+            if reflection.get("verdict") == "PASS":
+                Console.agent_log("Gatekeeper", "Reflection verdict: PASS", level="success")
+            else:
+                Console.agent_log("Gatekeeper", f"Reflection verdict: FAIL – {reflection.get('revision_notes', '')[:120]}", level="warn")
+
+            # Interactive approval
+            if Console.confirm(f"Approve and publish this {args.type}?", default=False):
+                pub_result = orch.approve(yes=True, base_branch=getattr(args, "base", "main"))
+                if pub_result.get("status") == "published":
+                    Console.success(f"{args.type.upper()} published successfully!")
+                    Console.kv("URL", pub_result.get("result", {}).get("html_url", ""))
+                else:
+                    Console.error(f"Publish failed: {pub_result.get('error', 'unknown')}")
+            else:
+                orch.approve(yes=False)
+                Console.agent_log("Gatekeeper", "Draft rejected. No changes made.")
+        else:
+            Console.info(f"Draft result: {result.get('status', 'unknown')}")
+
+    finally:
+        orch.shutdown()
+
+
+def cmd_approve_protocol(args):
+    """Approve/reject via A2A protocol."""
+    Console.header("GitHub AI Agent — Approve Draft [Protocol Mode: MCP + A2A]")
+
+    if args.yes and args.no:
+        Console.error("Cannot use both --yes and --no")
+        sys.exit(1)
+    if not args.yes and not args.no:
+        Console.error("Must specify --yes or --no")
+        sys.exit(1)
+
+    orch = _make_orchestrator(args)
+    try:
+        result = orch.approve(
+            yes=args.yes,
+            head_branch=getattr(args, "head", ""),
+            base_branch=getattr(args, "base", "main"),
+        )
+
+        if args.yes and result.get("status") == "published":
+            Console.success(f"Published! URL: {result.get('result', {}).get('html_url', '')}")
+        elif args.no:
+            Console.agent_log("Gatekeeper", "Draft rejected. No changes made.")
+        else:
+            Console.error(f"Publish failed: {result.get('error', result.get('message', 'unknown'))}")
+    finally:
+        orch.shutdown()
+
+
+def cmd_improve_protocol(args):
+    """Task 3 via A2A protocol."""
+    Console.header(f"GitHub AI Agent — Improve {args.type.upper()} #{args.number} [Protocol Mode: MCP + A2A]")
+    orch = _make_orchestrator(args)
+    try:
+        result = orch.improve(
+            number=args.number,
+            kind=args.type,
+            context=getattr(args, "context", "") or "",
+        )
+
+        if result.get("status") == "improvement_ready":
+            Console.section("Title Comparison")
+            Console.kv("Before", result.get("original_title", ""))
+            Console.kv("After", result.get("improved_title", ""))
+            Console.blank()
+            Console.section("Improved Body")
+            Console.markdown_preview(result.get("improved_body", ""), max_lines=60)
+
+            if Console.confirm(f"Apply improvement to {args.type} #{args.number}?", default=False):
+                tool_name = "github_update_issue" if args.type == "issue" else "github_update_pr"
+                orch.mcp.call_github_tool(tool_name, {
+                    "number": args.number,
+                    "title": result["improved_title"],
+                    "body": result["improved_body"],
+                })
+                Console.success(f"{args.type.capitalize()} #{args.number} updated!")
+            else:
+                Console.info("Cancelled. Original unchanged.")
+        else:
+            Console.error(f"Improvement failed: {result.get('message', 'unknown')}")
+    finally:
+        orch.shutdown()
+
+
 # ── Parser ────────────────────────────────────────────────────────────────────
 
 def build_parser():
@@ -419,6 +595,10 @@ Expected output pattern:
     shared.add_argument("--token", help="GitHub personal access token")
     shared.add_argument("--owner", help="GitHub owner/org")
     shared.add_argument("--repo-name", dest="repo_name", help="GitHub repository name")
+    shared.add_argument(
+        "--mode", choices=["direct", "protocol"], default="direct",
+        help="Execution mode: 'direct' (original) or 'protocol' (MCP + A2A)",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -482,7 +662,22 @@ def main():
     args = parser.parse_args()
 
     try:
-        args.func(args)
+        # Route to protocol-mode commands if --mode protocol
+        if _is_protocol_mode(args):
+            protocol_funcs = {
+                "review": cmd_review_protocol,
+                "draft": cmd_draft_protocol,
+                "approve": cmd_approve_protocol,
+                "improve": cmd_improve_protocol,
+            }
+            func = protocol_funcs.get(args.command)
+            if func:
+                func(args)
+            else:
+                Console.warning(f"Command '{args.command}' not supported in protocol mode. Using direct mode.")
+                args.func(args)
+        else:
+            args.func(args)
     except KeyboardInterrupt:
         Console.warning("\nAborted.")
         sys.exit(0)

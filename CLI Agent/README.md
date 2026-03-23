@@ -1,4 +1,5 @@
 # 🤖 GitHub AI Agent
+# This agent is made by Josh Wilcox, Ben Hartmann, and John Harris.
 
 A personalized, fully local AI agent for GitHub repository management.
 Powered by **Ollama llama3.2:3b** — no cloud AI required.

@@ -92,8 +92,6 @@ class A2AOrchestrator:
             proc = subprocess.Popen(
                 [sys.executable, script],
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
                 cwd=_CLI_DIR,
             )
             self._processes.append(proc)

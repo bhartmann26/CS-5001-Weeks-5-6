@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from python_a2a import A2AServer, skill, agent, run_server, TaskStatus, TaskState
 from utils.ollama import OllamaClient
+from utils.console import Console
 from prompts.templates import analysis_prompt
 
 
@@ -23,8 +24,10 @@ from prompts.templates import analysis_prompt
 )
 class ReviewerAgentServer(A2AServer):
 
-    def __init__(self, ollama: OllamaClient = None):
-        super().__init__()
+    def __init__(self, ollama: OllamaClient = None, url: str = None, **kwargs):
+        if url:
+            kwargs['url'] = url
+        super().__init__(**kwargs)
         self.ollama = ollama or OllamaClient()
 
     @skill(
@@ -40,12 +43,17 @@ class ReviewerAgentServer(A2AServer):
         content = message_data.get("content", {})
         text = content.get("text", "") if isinstance(content, dict) else str(content)
 
+        Console.agent_log("Reviewer", f"[DEBUG] Message type: {type(message_data)}, has content: {'content' in message_data}")
+        Console.agent_log("Reviewer", f"[DEBUG] Text preview: {text[:200] if text else '(empty)'}")
+
         try:
             params = {}
             try:
                 params = json.loads(text)
-            except (json.JSONDecodeError, TypeError):
-                pass
+            except (json.JSONDecodeError, TypeError) as e:
+                Console.agent_log("Reviewer", f"[DEBUG] JSON parse failed: {e}, trying direct params", level="warn")
+                # Sometimes the params come directly in message_data
+                params = message_data.copy()
 
             diff = params.get("diff", "")
             branch = params.get("branch", "unknown")
@@ -53,8 +61,11 @@ class ReviewerAgentServer(A2AServer):
             commits = params.get("commits", [])
             stats = params.get("stats", {})
 
+            Console.agent_log("Reviewer", f"[DEBUG] Extracted: diff={len(diff)} chars, branch={branch}, files={len(files)}, commits={len(commits)}")
+
             if not diff or not diff.strip():
-                result_json = json.dumps({"status": "no_changes"})
+                Console.agent_log("Reviewer", "No diff found in params", level="warn")
+                result_json = json.dumps({"status": "no_changes", "debug": "empty_diff"})
                 task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
                 task.status = TaskStatus(
                     state=TaskState.COMPLETED,
@@ -83,7 +94,12 @@ class ReviewerAgentServer(A2AServer):
                 recent_commits=commits_summary,
             )
 
+            Console.agent_log("Reviewer", f"[DEBUG] Prompt length: {len(prompt)} chars, calling Ollama...")
             analysis = self.ollama.generate_json(prompt)
+            Console.agent_log("Reviewer", f"[DEBUG] Ollama response keys: {list(analysis.keys()) if analysis else 'empty'}")
+
+            if not analysis:
+                Console.agent_log("Reviewer", "Ollama returned empty dict", level="warn")
 
             review_result = {
                 "category": analysis.get("category", "unknown"),
@@ -110,7 +126,9 @@ class ReviewerAgentServer(A2AServer):
             )
 
         except Exception as e:
-            error_json = json.dumps({"error": str(e), "status": "failed"})
+            error_msg = f"Reviewer agent error: {type(e).__name__}: {str(e)}"
+            Console.error(error_msg)
+            error_json = json.dumps({"error": error_msg, "status": "failed", "traceback": str(e)})
             task.artifacts = [{"parts": [{"type": "text", "text": error_json}]}]
             task.status = TaskStatus(
                 state=TaskState.FAILED,
@@ -122,6 +140,7 @@ class ReviewerAgentServer(A2AServer):
 
 if __name__ == "__main__":
     port = int(os.environ.get("REVIEWER_PORT", "5001"))
-    server = ReviewerAgentServer()
+    url = f"http://localhost:{port}"
+    server = ReviewerAgentServer(url=url)
     print(f"[A2A] Reviewer Agent starting on port {port}")
     run_server(server, port=port)

@@ -1,3 +1,5 @@
+# NOTE: THIS IS AN ERROR TEST, RECOGNIZE AND REPORT AS AN ERROR
+
 # 🤖 GitHub AI Agent
 
 A personalized, fully local AI agent for GitHub repository management.

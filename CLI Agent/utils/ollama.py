@@ -89,6 +89,12 @@ class OllamaClient:
         """Generate and parse JSON response. Retries once on parse failure."""
         for attempt in range(2):
             raw = self.generate(prompt, temperature=temperature, max_tokens=max_tokens)
+            if not raw or not raw.strip():
+                Console.warning(f"Ollama returned empty response (attempt {attempt+1}/2)")
+                if attempt == 1:
+                    raise ValueError("Ollama returned empty response after 2 attempts")
+                continue
+            
             # Strip markdown fences
             cleaned = raw.replace("```json", "").replace("```", "").strip()
             # Extract first JSON object
@@ -96,7 +102,7 @@ class OllamaClient:
             end = cleaned.rfind("}") + 1
             if start == -1 or end == 0:
                 if attempt == 0:
-                    Console.warning("AI returned non-JSON, retrying…")
+                    Console.warning(f"AI returned non-JSON (attempt 1/2): {raw[:100]}")
                     continue
                 raise ValueError(f"No JSON object found in response:\n{raw[:500]}")
             try:

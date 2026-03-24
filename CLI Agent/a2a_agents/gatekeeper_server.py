@@ -27,6 +27,11 @@ _DRAFT_FILE = os.path.join(_CLI_DIR, ".agent_draft.json")
 )
 class GatekeeperAgentServer(A2AServer):
 
+    def __init__(self, url: str = None, **kwargs):
+        if url:
+            kwargs['url'] = url
+        super().__init__(**kwargs)
+
     @skill(
         name="Gate Draft",
         description="Save a draft for human approval/rejection",
@@ -102,6 +107,7 @@ class GatekeeperAgentServer(A2AServer):
 
 if __name__ == "__main__":
     port = int(os.environ.get("GATEKEEPER_PORT", "5005"))
-    server = GatekeeperAgentServer()
+    url = f"http://localhost:{port}"
+    server = GatekeeperAgentServer(url=url)
     print(f"[A2A] Gatekeeper Agent starting on port {port}")
     run_server(server, port=port)

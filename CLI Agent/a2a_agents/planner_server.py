@@ -26,8 +26,10 @@ from prompts.templates import planning_prompt, instruction_planning_prompt, json
 )
 class PlannerAgentServer(A2AServer):
 
-    def __init__(self, ollama: OllamaClient = None):
-        super().__init__()
+    def __init__(self, ollama: OllamaClient = None, url: str = None, **kwargs):
+        if url:
+            kwargs['url'] = url
+        super().__init__(**kwargs)
         self.ollama = ollama or OllamaClient()
 
     @skill(
@@ -160,6 +162,7 @@ class PlannerAgentServer(A2AServer):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PLANNER_PORT", "5002"))
-    server = PlannerAgentServer()
+    url = f"http://localhost:{port}"
+    server = PlannerAgentServer(url=url)
     print(f"[A2A] Planner Agent starting on port {port}")
     run_server(server, port=port)

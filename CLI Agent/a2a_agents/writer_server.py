@@ -27,8 +27,10 @@ from patterns.planner import Plan
 )
 class WriterAgentServer(A2AServer):
 
-    def __init__(self, ollama: OllamaClient = None):
-        super().__init__()
+    def __init__(self, ollama: OllamaClient = None, url: str = None, **kwargs):
+        if url:
+            kwargs['url'] = url
+        super().__init__(**kwargs)
         self.ollama = ollama or OllamaClient()
 
     @skill(
@@ -182,6 +184,7 @@ class _MockFile:
 
 if __name__ == "__main__":
     port = int(os.environ.get("WRITER_PORT", "5003"))
-    server = WriterAgentServer()
+    url = f"http://localhost:{port}"
+    server = WriterAgentServer(url=url)
     print(f"[A2A] Writer Agent starting on port {port}")
     run_server(server, port=port)

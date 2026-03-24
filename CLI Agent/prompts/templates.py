@@ -5,59 +5,57 @@ Centralized here to make tuning easy.
 
 
 def analysis_prompt(diff: str, files_summary: str, branch: str, recent_commits: str) -> str:
-    return f"""You are a senior software engineer performing a thorough code review.
-Analyze the git diff below and return ONLY a valid JSON object — no markdown, no explanation, no preamble.
+    return f"""Analyze this git diff and return ONLY valid JSON (no markdown, no preamble).
 
 Branch: {branch}
-
-Recent commits:
-{recent_commits}
 
 Files changed:
 {files_summary}
 
-Diff (may be truncated):
-{diff[:7000]}
+Diff:
+{diff[:6000]}
 
-Return this EXACT JSON schema (all fields required):
+Return valid JSON with this structure (example values shown):
 {{
-  "category": "<feature|bugfix|refactor|docs|test|chore|security|performance>",
-  "risk": "<low|medium|high>",
-  "risk_reason": "<one sentence justifying the risk level with specific evidence from the diff>",
-  "summary": "<2-3 sentences describing what changed and why it matters>",
+  "category": "feature",
+  "risk": "medium",
+  "risk_reason": "Adds new API endpoint without rate limiting",
+  "summary": "Added login endpoint with password validation. Endpoint is missing rate limiting which could enable brute force attacks. Implementation follows existing patterns.",
   "issues": [
     {{
-      "severity": "<critical|warning|info>",
-      "file": "<filename>",
-      "line_hint": "<approximate line or function name from diff, or empty string>",
-      "description": "<what the issue is>",
-      "suggestion": "<concrete fix or improvement>",
-      "evidence": "<quote or paraphrase of the specific diff line(s) that show this issue>"
+      "severity": "warning",
+      "file": "auth/login.py",
+      "line_hint": "+def login(user, pwd):",
+      "description": "Missing rate limiting on login endpoint",
+      "suggestion": "Add rate limiter with max 5 attempts per minute",
+      "evidence": "Line 47: +def login(user, pwd): return db.check(user, pwd)"
     }}
   ],
   "improvements": [
     {{
-      "type": "<performance|readability|security|maintainability|testing|error_handling>",
-      "file": "<filename>",
-      "description": "<what could be better>",
-      "suggestion": "<specific actionable suggestion>",
-      "evidence": "<relevant line or pattern from diff>"
+      "type": "security",
+      "file": "auth/login.py",
+      "description": "Consider adding email verification",
+      "suggestion": "Send verification email after successful login",
+      "evidence": "No email verification flow in current implementation"
     }}
   ],
   "recommendation": {{
-    "action": "<create_issue|create_pr|no_action>",
-    "justification": "<2-3 sentences explaining this decision with direct evidence from the diff — cite file names and specific changes>",
-    "suggested_title": "<concise, informative title for the issue or PR>",
-    "labels": ["<label1>", "<label2>"]
+    "action": "create_issue",
+    "justification": "Auth changes need security review. Recommend creating GitHub issue to track rate limiting implementation.",
+    "suggested_title": "Add rate limiting to login endpoint",
+    "labels": ["security", "authentication", "enhancement"]
   }},
   "stats": {{
-    "lines_added": <int>,
-    "lines_removed": <int>,
-    "has_tests": <true|false>,
-    "has_docs": <true|false>,
-    "security_sensitive": <true|false>
+    "lines_added": 15,
+    "lines_removed": 0,
+    "has_tests": false,
+    "has_docs": false,
+    "security_sensitive": true
   }}
-}}"""
+}}
+
+Now analyze the actual diff above and return JSON with real values (not the example):"""
 
 
 def issue_draft_prompt(analysis: dict, diff_snippet: str, custom_instructions: str = "") -> str:

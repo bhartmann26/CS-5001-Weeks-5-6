@@ -25,10 +25,16 @@ from prompts.templates import reflection_prompt
 )
 class CriticAgentServer(A2AServer):
 
+<<<<<<< HEAD
     def __init__(self, ollama: OllamaClient = None, url: str = None, **kwargs):
         if url:
             kwargs['url'] = url
         super().__init__(**kwargs)
+=======
+    def __init__(self, ollama: OllamaClient = None):
+        port = int(os.environ.get("CRITIC_PORT", "5004"))
+        super().__init__(url=f"http://localhost:{port}")
+>>>>>>> a85e6e12bfdc907914c9af95aec89666dd0a6c03
         self.ollama = ollama or OllamaClient()
 
     @skill(
@@ -61,8 +67,12 @@ class CriticAgentServer(A2AServer):
                     "revision_notes": "\n".join(f"- Fix: {p}" for p in policy_failures),
                     "passes_policy": False,
                 }
-                task.artifacts = [{"parts": [{"type": "text", "text": json.dumps(artifact)}]}]
-                task.status = TaskStatus(state=TaskState.COMPLETED)
+                result_json = json.dumps(artifact)
+                task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
+                task.status = TaskStatus(
+                    state=TaskState.COMPLETED,
+                    message={"role": "agent", "content": {"type": "text", "text": result_json}}
+                )
                 return task
 
             # ── 2. Section presence check ─────────────────────────────────
@@ -111,13 +121,18 @@ class CriticAgentServer(A2AServer):
                 "passes_policy": True,
             }
 
-            task.artifacts = [{"parts": [{"type": "text", "text": json.dumps(artifact)}]}]
-            task.status = TaskStatus(state=TaskState.COMPLETED)
+            result_json = json.dumps(artifact)
+            task.artifacts = [{"parts": [{"type": "text", "text": result_json}]}]
+            task.status = TaskStatus(
+                state=TaskState.COMPLETED,
+                message={"role": "agent", "content": {"type": "text", "text": result_json}}
+            )
 
         except Exception as e:
+            error_json = json.dumps({"error": str(e), "verdict": "FAIL", "findings": [str(e)]})
             task.status = TaskStatus(
                 state=TaskState.FAILED,
-                message={"role": "agent", "content": {"type": "text", "text": f"Reflection failed: {e}"}},
+                message={"role": "agent", "content": {"type": "text", "text": error_json}},
             )
 
         return task

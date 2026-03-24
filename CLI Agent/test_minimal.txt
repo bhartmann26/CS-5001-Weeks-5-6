@@ -1,0 +1,2 @@
+Minimal test file for fast A2A review.
+Second line to trigger a small diff.

@@ -24,10 +24,16 @@ from prompts.templates import analysis_prompt
 )
 class ReviewerAgentServer(A2AServer):
 
+<<<<<<< HEAD
     def __init__(self, ollama: OllamaClient = None, url: str = None, **kwargs):
         if url:
             kwargs['url'] = url
         super().__init__(**kwargs)
+=======
+    def __init__(self, ollama: OllamaClient = None):
+        port = int(os.environ.get("REVIEWER_PORT", "5001"))
+        super().__init__(url=f"http://localhost:{port}")
+>>>>>>> a85e6e12bfdc907914c9af95aec89666dd0a6c03
         self.ollama = ollama or OllamaClient()
 
     @skill(
